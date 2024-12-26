@@ -200,7 +200,7 @@ class RandomHierarchyModel(Dataset):
             num_layers=2,
             seed_rules=0,
             seed_sample=1,
-            train_size=-1,
+            train_size=-1, # raises ValueError if not set
             test_size=0,
             input_format='onehot',
             whitening=0,
@@ -215,8 +215,10 @@ class RandomHierarchyModel(Dataset):
         self.tuple_size = tuple_size
 
         rules = sample_rules( num_features, num_classes, num_synonyms, tuple_size, num_layers, seed=seed_rules)
- 
+        self.rules = rules # for saving / loading
+
         max_data = num_classes * num_synonyms ** ((tuple_size ** num_layers - 1) // (tuple_size - 1))
+        print(max_data)
         assert train_size >= -1, "train_size must be greater than or equal to -1"
 
         if max_data > 1e19 and not replacement:
@@ -284,3 +286,51 @@ class RandomHierarchyModel(Dataset):
 
     def get_rules(self):
         return self.rules
+    
+    #TODO overhaul RHM to allow for easy save/loading
+    # def save(self, filepath):
+    #         """
+    #         Save the dataset to a file, including metadata and data.
+    #         NOTE: Does not work for a loaded dataset.
+    #         """
+    #         # Save parameters as metadata
+    #         metadata = {
+    #             "num_features": self.num_features,
+    #             "num_classes": self.num_classes,
+    #             "num_synonyms": self.num_synonyms,
+    #             "tuple_size": self.tuple_size,
+    #             "num_layers": self.num_layers,
+    #             "rules": self.rules,
+    #         }
+
+    #         # Save metadata and data
+    #         torch.save(
+    #             {
+    #                 "metadata": metadata,
+    #                 "features": self.features,
+    #                 "labels": self.labels,
+    #                 "rules": self.rules,
+    #             },
+    #             filepath,
+    #         )
+    #         print(f"Dataset saved to {filepath}")
+
+    # @classmethod
+    # def load(cls, filepath):
+    #     """
+    #     Load a dataset from a file, including metadata and data.
+    #     """
+    #     # Load data from file
+    #     data = torch.load(filepath)
+    #     metadata = data["metadata"]
+
+    #     # Create a new instance of the class using metadata
+    #     instance = cls(**metadata)
+
+    #     # Overwrite features, labels, and rules
+    #     instance.features = data["features"]
+    #     instance.labels = data["labels"]
+    #     instance.rules = data["rules"]
+
+    #     print(f"Dataset loaded from {filepath}")
+    #     return instance

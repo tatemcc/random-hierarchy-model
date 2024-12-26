@@ -16,12 +16,15 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.data as data_utils
 
+import wandb
+
 import pickle
 
 import datasets
 import models
 import init
 import training
+
 import measures
 
 def run( args):
@@ -58,11 +61,26 @@ def run( args):
 
     start_time = time.time()
 
+    test_loss, test_acc, avg_epoch_time = best['loss'], best['acc'], None # for first few wandb loga
+
     for epoch in range(args.max_epochs):
 
         loss = training.train( model, train_loader, accumulation, criterion, optimizer, scheduler)
 
-        if (epoch+1)==print_ckpt:
+        # Log current & best dynamics to wandb
+        wandb.log({
+            'epoch': epoch + 1,
+            'train_loss': loss,
+            'test_loss': test_loss,
+            'test_acc': test_acc,
+            'lr': scheduler.get_last_lr()[0],
+            'avg_epoch_time': avg_epoch_time,
+            'best_epoch': best['epoch'],
+            'best_loss': best['loss'],
+            'best_acc': best['acc']
+        })
+
+        if (epoch+1)==print_ckpt or (epoch+1 == args.max_epochs):
 
             avg_epoch_time = (time.time()-start_time)/(epoch+1)
             test_loss, test_acc = measures.test(model, test_loader)
@@ -74,38 +92,54 @@ def run( args):
                 best['model'] = copy.deepcopy( model.state_dict())
 
             dynamics.append({'t': epoch+1, 'trainloss': loss, 'testloss': test_loss, 'testacc': test_acc})
-            print('Epoch : ',epoch+1, '\t train loss: {:06.4f}'.format(loss), ',test loss: {:06.4f}'.format(test_loss), ', test acc.: {:04.2f}'.format(test_acc), ', epoch time: {:5f}'.format(avg_epoch_time))
+            print(
+            'Epoch : ', epoch + 1,
+            '\t train loss: {:06.4f}'.format(loss),
+            ', test loss: {:06.4f}'.format(test_loss),
+            ', test acc.: {:04.2f}'.format(test_acc),
+            ', lr: {:.5e}'.format(scheduler.get_last_lr()[0]),
+            ', epoch time: {:06.2f}'.format(avg_epoch_time)
+            )
+
+            if epoch+1 == args.max_epochs: print('This was the max epoch!')
             print_ckpt = next(print_ckpts)
 
-            if (epoch+1)==save_ckpt:
+        if loss <= args.loss_threshold:
 
-                print(f'Checkpoint at epoch {epoch+1}, saving data ...')
-                output = {
-                    'init': model0.state_dict(),
-                    'best': best,
-                    'model': copy.deepcopy(model.state_dict()),
-                    'dynamics': dynamics,
-                    'epoch': epoch+1
-                }
-                with open(args.outname, "wb") as handle:
-                    pickle.dump(args, handle)
-                    pickle.dump(output, handle)
-                save_ckpt = next(save_ckpts)
+            print(f'Loss={loss} passed threshold={args.loss_threshold}, this is last epoch ...')
+            output = {
+                'init': model0.state_dict(),
+                'best': best,
+                'model': copy.deepcopy(model.state_dict()),
+                'dynamics': dynamics,
+                'epoch': epoch+1
+            }
+            with open(args.outname, "wb") as handle:
+                pickle.dump(args, handle)
+                pickle.dump(output, handle)
 
-            if loss <= args.loss_threshold:
+            break
+        elif (epoch+1)==save_ckpt:
 
-                output = {
-                    'init': model0.state_dict(),
-                    'best': best,
-                    'model': copy.deepcopy(model.state_dict()),
-                    'dynamics': dynamics,
-                    'epoch': epoch+1
-                }
-                with open(args.outname, "wb") as handle:
-                    pickle.dump(args, handle)
-                    pickle.dump(output, handle)
+            print(f'Checkpoint at epoch {epoch+1}, saving data ...')
+            output = {
+                'init': model0.state_dict(),
+                'best': best,
+                'model': copy.deepcopy(model.state_dict()),
+                'dynamics': dynamics,
+                'epoch': epoch+1
+            }
+            with open(args.outname, "wb") as handle:
+                pickle.dump(args, handle)
+                pickle.dump(output, handle)
+            save_ckpt = next(save_ckpts)
 
-                break
+
+    print(f"Training time: {(time.time() - start_time):.2f}")
+    print('Best test stats:')
+    print(f"  Best epoch   : {best['epoch']}")
+    print(f"  Best loss    : {best['loss']:.4f}")
+    print(f"  Best accuracy: {best['acc']:.2f}%")
 
     return None
 
@@ -116,8 +150,8 @@ parser.add_argument("--device", type=str, default='cuda')
 '''
 	DATASET ARGS
 '''
-parser.add_argument('--dataset', type=str)
-parser.add_argument('--mode', type=str, default=None)
+parser.add_argument('--dataset', default="rhm", type=str)
+parser.add_argument('--mode', type=str, required=True, choices=['masked', 'AR_last', 'AR_window'])
 parser.add_argument('--num_features', metavar='v', type=int, help='number of features')
 parser.add_argument('--num_classes', metavar='n', type=int, help='number of classes')
 parser.add_argument('--num_synonyms', metavar='m', type=int, help='multiplicity of low-level representations')
@@ -135,7 +169,7 @@ parser.add_argument('--whitening', type=int, default=0)
 '''
 	ARCHITECTURE ARGS
 '''
-parser.add_argument('--model', type=str, help='architecture (fcn and hcnn implemented)')
+parser.add_argument('--model', type=str, help='architecture (fcn and hcnn implemented)', default='transformer_mla', choices=['fcn', 'hcnnn', 'hlcn', 'transformer_mla'])
 parser.add_argument('--depth', type=int, help='depth of the network')
 parser.add_argument('--width', type=int, help='width of the network')
 parser.add_argument("--filter_size", type=int, default=None)
@@ -162,4 +196,14 @@ parser.add_argument('--loss_threshold', type=float, default=1e-3)
 parser.add_argument('--outname', type=str, required=True, help='path of the output file')
 
 args = parser.parse_args()
+
+group = f'{os.environ.get("SLURM_ARRAY_JOB_ID", "unknown")}-{os.environ.get("SLURM_JOB_NAME", "unknown")}'
+
+wandb.init(
+    project="Random Hierarchy Model",
+    entity='tate-ubc',
+    config=args,
+    group=group,
+    name=f'({os.environ.get("SLURM_ARRAY_TASK_ID", "unknown")}) {os.path.basename(args.outname)}'
+)
 run( args)

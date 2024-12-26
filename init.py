@@ -10,6 +10,8 @@ import datasets
 import models
 import measures
 
+import time # for RHM load timing
+
 
 class CosineWarmupLR(optim.lr_scheduler._LRScheduler):
 
@@ -36,8 +38,10 @@ def init_data(args):
     Returns:
         Two dataloaders for train and test set.
     """
+    start = time.time()
     if args.dataset=='rhm':
 
+        
         dataset = datasets.RandomHierarchyModel(
             num_features=args.num_features,	# vocabulary size
             num_synonyms=args.num_synonyms,	# features multiplicity
@@ -53,14 +57,16 @@ def init_data(args):
             replacement=args.replacement	# Automatically true for num_data > 1e19
         )
 
+
         args.input_size = args.tuple_size**args.num_layers
-        if args.num_tokens < args.input_size:	# only take last num_tokens positions
-            dataset.features = dataset.features[:,:,-args.num_tokens:]
 
     else:
         raise ValueError('dataset argument is invalid!')
 
     if args.mode == 'masked':	# hide last feature from input and set it as label
+
+        if args.num_tokens < args.input_size:	# only take last num_tokens positions
+            dataset.features = dataset.features[:,:,-args.num_tokens:]
 
         dataset.labels = torch.argmax( dataset.features[:,:,-1],dim=1)
 
@@ -69,19 +75,56 @@ def init_data(args):
             args.num_tokens -= 1
 
         else:				# for other models replace masked token with ones
-            mask = torch.ones(args.num_features)*args.num_features**-.5
-            mask = torch.tile( mask, [args.train_size+args.test_size, 1])
-            dataset.features[:,:,-1] = mask
+            mask = torch.ones(args.num_features)*args.num_features**-.5 
+            mask = torch.tile( mask, [args.train_size+args.test_size, 1]) # shape is (total samples, args.num_features)
+            dataset.features[:,:,-1] = mask # just replace last timestep with all ones across features in every example
+
+    elif 'AR' in args.mode:  # setup for autoregressive training
+        
+        if args.num_tokens < 2 or args.num_tokens > (args.input_size - 1):
+            raise ValueError(f"Autoregressive mode requires args.num_tokens={args.num_tokens} is in {{1,2,..., s^L-1={args.input_size-1}}}.")
+
+        if args.mode == 'AR_window': raise ValueError('AR window not implemented!') #TODO implement AR window 
+        elif args.mode == 'AR_last':
+            # num_tokens adjacent to last token
+            x = dataset.features[:,:,-(args.num_tokens+1):-1] # (total samples, args.num_features, num_tokens)
+            # index corresponding to each
+            y = torch.argmax( dataset.features[:,:,-args.num_tokens:], dim=1)  # (total_samples, num_tokens)
+
+            dataset.features = x
+            dataset.labels = y
+
+        #TODO adapt format for non-transformer models
+
+        # sequence, feature_dim, time = dataset.features.shape
+
+        # padding = torch.zeros((sequence, feature_dim, args.num_tokens - 1), device=dataset.features.device)
+        # padded_features = torch.cat([padding, dataset.features], dim=2)  # Shape: (sequences, feature, time + context_length - 1)
+
+        # # Create sliding windows of context length
+        # x = torch.stack([padded_features[:, :, i:i + args.num_tokens] for i in range(time - 1)], dim=1)  
+        # # x shape after stacking: (sequences, time - 1, feature, context_length)
+        # dataset.features = x.reshape(-1, feature_dim, args.num_tokens)
+
+        # y = dataset.features[:, :, 1:]  # Shape: (sequences, feature, time - 1)
+        # y = y.permute(0, 2, 1).reshape(-1, feature_dim)  # Shape: (sequences * (time - 1), feature)
+        # dataset.labels = torch.argmax(y,dim=1) # Shape: (sequences * (time - 1), )
+
+
 
     if 'fcn' in args.model:		# fcn requires flattening of the input
         dataset.features = dataset.features.transpose(1,2).flatten( start_dim=1) # groups of adjacent num_features correspond to a pixel
 
     if 'transformer' in args.model:	# transformer requires [batch_size, seq_len, num_channels] format
+        # print('transformer check in init!')
         dataset.features = dataset.features.transpose(1,2)
         # TODO: append classification token to input for transformers used in class
 
-    dataset.features, dataset.labels = dataset.features.to(args.device), dataset.labels.to(args.device)	# move to device when using cuda
+    end = time.time()
+    print(f"Dataset generation took {(end - start):.4f} seconds.", flush=True)
+    start = time.time()
 
+    dataset.features, dataset.labels = dataset.features.to(args.device), dataset.labels.to(args.device)	# move to device when using cuda
     trainset = torch.utils.data.Subset(dataset, range(args.train_size))
     train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=0)
 
@@ -91,6 +134,9 @@ def init_data(args):
     else:
         test_loader = None
 
+    end = time.time()
+    print(f"Generating dataloaders took {(end - start):.4f} seconds.", flush=True)
+
     return train_loader, test_loader
 
 def init_model(args):
@@ -98,6 +144,8 @@ def init_model(args):
     Initialise machine-learning model. 
     """
     torch.manual_seed(args.seed_model)
+
+    if 'AR' in args.mode: assert args.model == 'transformer_mla', 'autoregression only implemented for transformer_mla!'
 
     if args.model == 'fcn':
 
@@ -165,12 +213,21 @@ def init_model(args):
 
         if args.model == 'transformer_mla':
 
+            # need causal model that keeps time dimension for AR
+            causal = False
+            keep_time = False
+            if 'AR' in args.mode:
+                causal = True
+                keep_time = True
+
             model = models.MLA(
                 vocab_size=args.num_features,
                 block_size=args.num_tokens,
                 embedding_dim=args.embedding_dim,
                 num_heads=args.num_heads,
-                num_layers=args.depth
+                num_layers=args.depth,
+                causal=causal,
+                keep_time=keep_time
             )
 
     else:

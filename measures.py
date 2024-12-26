@@ -23,6 +23,6 @@ def test( model, dataloader):
 
             loss += F.cross_entropy(outputs, targets, reduction='sum').item()
             correct += predictions.eq(targets).sum().item()
-            total += targets.size(0)
+            total += targets.numel()
 
     return loss / total, 1.0 * correct / total

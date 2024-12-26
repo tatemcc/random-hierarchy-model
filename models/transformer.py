@@ -6,7 +6,7 @@ from .fcn import MLP
 
 class MultiHeadAttention(nn.Module):
     """
-    Multiple Attention Heads.
+    Multiple Attention Heads. Now support causal attention.
     
     Args:
         input_dim: The dimension of input tokens.
@@ -39,7 +39,7 @@ class MultiHeadAttention(nn.Module):
             torch.randn( self.out_dim, self.inner_dim)
         )
 
-    def forward(self, x):
+    def forward(self, x, causal_mask=False):
         """
         Args:
             x: input, tensor of size (batch_size, input_size, input_dim).
@@ -54,6 +54,12 @@ class MultiHeadAttention(nn.Module):
         v = F.linear( x, self.value, bias=None).view(B, T, self.num_heads, self.head_dim).transpose(1,2) *C**-.5  # [bs, num_heads, seq_len, head_dim]
 
         weight = q @ k.transpose(-2,-1) * self.head_dim**-.5             # [bs, num_heads, seq_len, seq_len]
+
+        if causal_mask:
+            causal_mask = torch.triu(torch.ones(T, T, device=x.device), diagonal=1).bool()
+            weight = weight.masked_fill(causal_mask, float('-inf'))
+
+        
         weight = F.softmax(weight, dim=-1)                              #  //
 
         out = (weight @ v).transpose(1,2).reshape(B,T,-1) # [bs, seq_len, inner_dim]
@@ -77,7 +83,25 @@ class AttentionBlock(nn.Module):
         )
 
     def forward(self, x):
-        x = self.sa(x)
+        x = self.sa(x, causal_mask=False)
+        return x
+    
+class CausalAttentionBlock(nn.Module):
+    def __init__(
+        self, embedding_dim, num_heads
+    ):
+        super().__init__()
+        assert embedding_dim % num_heads == 0, "embedding dim. must be multiple of num. heads"
+
+        self.sa = MultiHeadAttention(
+            input_dim=embedding_dim,
+            num_heads=num_heads,
+            head_dim=embedding_dim//num_heads,
+            out_dim=embedding_dim
+        )
+
+    def forward(self, x):
+        x = self.sa(x, causal_mask=True)
         return x
 
 
@@ -127,17 +151,28 @@ class MLA(nn.Module):
         embedding_dim: The embedding dimension.
         num_heads: The number of attention heads.
         num_layers: The number of layers.
+        causal: Whether or not to use causal attention. (default=False)
+        keep_time: Whether or not to keep the time axis of the input. (default=False)
+
+    Returns:
+        model(x).shape = (batch, vocab_dim) if keep_time=False or (batch, vocab_dim, seq_len)
+        if keep_time=True (note: this is a permutation of the input shape!)
+
     """
     def __init__(
-        self, vocab_size, block_size, embedding_dim, num_heads, num_layers
+        self, vocab_size, block_size, embedding_dim, num_heads, num_layers, causal=False, keep_time=False
     ):
         super().__init__()
+
+        self.attention_block = CausalAttentionBlock if causal else AttentionBlock
 
         self.vocab_size = vocab_size
         self.block_size = block_size
         self.embedding_dim = embedding_dim
         self.num_heads = num_heads
         self.num_layers = num_layers
+        
+        self.keep_time=keep_time
 
         self.token_embedding=nn.Parameter(
             torch.randn( self.embedding_dim, self.vocab_size)
@@ -146,7 +181,7 @@ class MLA(nn.Module):
 
         self.blocks = nn.Sequential(
             *[
-                AttentionBlock(
+                self.attention_block(
                     embedding_dim=self.embedding_dim,
                     num_heads=self.num_heads,
                 ) for _ in range(self.num_layers)
@@ -170,6 +205,9 @@ class MLA(nn.Module):
         pos_emb = self.position_embedding(torch.arange(T, device=x.device)) # [seq_len, embedding_dim]
         x = token_emb + pos_emb  # [bs, seq_len, embedding_dim]
         x = self.blocks(x)
-        logits = F.linear( x[:,-1,:], self.readout, bias=None) * self.readout.size(-1)**-.5
+        if self.keep_time:
+            logits = ( F.linear(x, self.readout, bias=None) * self.readout.size(-1)**-.5 ).permute(0,2,1) # [bs, vocab_dim, seq_len]
+        else:
+            logits = F.linear( x[:,-1,:], self.readout, bias=None) * self.readout.size(-1)**-.5 # [bs, vocab_dim]
 
         return logits
